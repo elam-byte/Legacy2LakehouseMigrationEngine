@@ -43,36 +43,36 @@ This toolkit provides the **bridge** between those two worlds:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Docker Compose Network: lakehouse                   │
-│                                                                             │
+┌───────────────────────────────────────────────────────────────────────── ──┐
+│                         Docker Compose Network: lakehouse                  │
+│                                                                            │
 │   ┌──────────────┐        ┌─────────────────────────────────────────────┐  │
-│   │  PostgreSQL  │        │                 TRINO :8080                  │  │
+│   │  PostgreSQL  │        │                 TRINO :8080                 │  │
 │   │  :5432       │◄──────►│   ┌──────────────┐  ┌────────────────────┐  │  │
 │   │  (legacy DB) │  JDBC  │   │ PG Connector │  │ Iceberg Connector  │  │  │
 │   │  5 tables    │        │   │ (reads rows) │  │ (writes Parquet)   │  │  │
 │   │  ~755k rows  │        │   └──────────────┘  └────────┬───────────┘  │  │
 │   └──────────────┘        └─────────────────────────────┼───────────────┘  │
-│                                                          │                  │
+│                                                         │                  │
 │   ┌──────────────┐        ┌─────────────────────────────▼───────────────┐  │
-│   │   NESSIE     │        │                  MinIO :9000                 │  │
-│   │  :19120      │◄──────►│            S3-compatible object store        │  │
-│   │  (Iceberg    │ REST   │            Parquet files in /warehouse/       │  │
-│   │   catalog)   │        │                                               │  │
-│   └──────────────┘        └───────────────────────────────────────────────┘  │
-│                                                                             │
+│   │   NESSIE     │        │                  MinIO :9000                │  │
+│   │  :19120      │◄──────►│            S3-compatible object store       │  │
+│   │  (Iceberg    │ REST   │            Parquet files in /warehouse/     │  │
+│   │   catalog)   │        │                                             │  │
+│   └──────────────┘        └─────────────────────────────────────────────┘  │
+│                                                                            │
 │   ┌──────────────┐        ┌──────────────────────────────────────────────┐ │
 │   │  PROMETHEUS  │        │              GRAFANA :3000                   │ │
 │   │  :9090       │───────►│   FinOps Dashboard: rows/sec, bytes/sec,     │ │
 │   │  (metrics)   │        │   cost estimates, MinIO storage, errors      │ │
 │   └──────────────┘        └──────────────────────────────────────────────┘ │
-│                                                                             │
+│                                                                            │
 │   ┌────────────────────────────────────────────────────────────────────┐   │
 │   │                   Python Migration Engine (CLI)                    │   │
 │   │   sqlglot transpiler • psycopg2 connector • trino-python-client    │   │
-│   │   discover → transpile DDL → CREATE TABLE → INSERT SELECT           │   │
+│   │   discover → transpile DDL → CREATE TABLE → INSERT SELECT          │   │
 │   └────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Data Flow: Zero-Copy Migration
@@ -83,10 +83,184 @@ PostgreSQL                    Trino                          MinIO / Iceberg
 customers (50k rows)   ──►  INSERT INTO iceberg.warehouse.customers
 products  (5k rows)    ──►  SELECT * FROM postgres.public.products    ──►  s3://warehouse/customers/*.parquet
 orders    (200k rows)  ──►  (single federated query, no staging)      ──►  s3://warehouse/orders/YYYY-MM/*.parquet
-...                                                                    ──►  Nessie catalogs metadata
+...                                                                   ──►  Nessie catalogs metadata
 ```
 
 The key insight: **Trino acts as a federation layer.** It reads from PostgreSQL (via JDBC) and writes to Iceberg (via the Nessie catalog + MinIO) in a single `INSERT INTO ... SELECT FROM` statement. No intermediate CSV files, no ETL staging tables, no proprietary migration tools.
+
+---
+
+## Azure Parallel Architecture
+
+Most enterprises run on Azure. Every component in this open-source stack has a direct Azure-managed equivalent. The diagram below shows both architectures side-by-side so you can see exactly how to lift this design into Azure with zero conceptual change — only the service names change.
+
+### Side-by-Side Comparison
+
+```
+┌──────────────────────────────────────┐    ┌──────────────────────────────────────────────┐
+│       THIS PROJECT (Open Source)     │    │           AZURE EQUIVALENT                   │
+│         Docker Compose / On-prem     │    │           Fully Managed Cloud                │
+├──────────────────────────────────────┤    ├──────────────────────────────────────────────┤
+│                                      │    │                                              │
+│  PostgreSQL (legacy source)          │◄──►│  Azure Database for PostgreSQL               │
+│  :5432 · JDBC                        │    │  (Flexible Server) · JDBC                    │
+│                                      │    │  ── or ──                                    │
+│                                      │    │  Azure SQL Database (SQL Server)             │
+│                                      │    │  Azure SQL Managed Instance (Oracle lift)    │
+│                                      │    │                                              │
+├──────────────────────────────────────┤    ├──────────────────────────────────────────────┤
+│                                      │    │                                              │
+│  sqlglot (SQL transpiler)            │◄──►│  sqlglot still used here — no Azure          │
+│  Python · open source                │    │  equivalent; Azure Data Factory has          │
+│                                      │    │  limited dialect mapping, sqlglot is         │
+│                                      │    │  more complete for Oracle→Spark SQL          │
+│                                      │    │                                              │
+├──────────────────────────────────────┤    ├──────────────────────────────────────────────┤
+│                                      │    │                                              │
+│  Trino (federated query engine)      │◄──►│  Azure Synapse Analytics                     │
+│  Docker · self-managed               │    │  · Synapse Serverless SQL Pool               │
+│                                      │    │    (reads ADLS Gen2 Parquet natively)        │
+│                                      │    │  · Synapse Spark Pool                        │
+│                                      │    │    (reads Iceberg via Delta/Iceberg support) │
+│                                      │    │  ── or ──                                    │
+│                                      │    │  Azure Databricks (Spark + Delta Lake)       │
+│                                      │    │                                              │
+├──────────────────────────────────────┤    ├──────────────────────────────────────────────┤
+│                                      │    │                                              │
+│  Apache Iceberg (table format)       │◄──►│  Delta Lake (Microsoft's open table format)  │
+│  Parquet + metadata JSON             │    │  · Parquet under the hood, same principles   │
+│  on MinIO                            │    │  · Native in Databricks + Synapse            │
+│                                      │    │  ── or ──                                    │
+│                                      │    │  Apache Iceberg on ADLS Gen2                 │
+│                                      │    │  (Synapse + Fabric both support it)          │
+│                                      │    │                                              │
+├──────────────────────────────────────┤    ├──────────────────────────────────────────────┤
+│                                      │    │                                              │
+│  Project Nessie (Iceberg catalog)    │◄──►│  Microsoft Purview                           │
+│  Git-like table versioning           │    │  · Unified data catalog + governance         │
+│  REST API                            │    │  · Lineage tracking, schema registry         │
+│                                      │    │  ── or ──                                    │
+│                                      │    │  Azure Databricks Unity Catalog              │
+│                                      │    │  · Fine-grained access control               │
+│                                      │    │  · Delta table versioning                    │
+│                                      │    │                                              │
+├──────────────────────────────────────┤    ├──────────────────────────────────────────────┤
+│                                      │    │                                              │
+│  MinIO (object storage)              │◄──►│  Azure Data Lake Storage Gen2 (ADLS Gen2)    │
+│  S3-compatible · local               │    │  · Hierarchical namespace                    │
+│  s3://warehouse/                     │    │  · abfss://warehouse@<account>.dfs.core…     │
+│                                      │    │  · 99.999999999% durability                  │
+│                                      │    │  · Lifecycle policies, tiering               │
+│                                      │    │                                              │
+├──────────────────────────────────────┤    ├──────────────────────────────────────────────┤
+│                                      │    │                                              │
+│  Prometheus (metrics collection)     │◄──►│  Azure Monitor                               │
+│  Pull-based scraping                 │    │  · Metrics + logs in one plane               │
+│                                      │    │  · Built-in Synapse / ADF integration        │
+│                                      │    │  · Prometheus-compatible remote write        │
+│                                      │    │                                              │
+├──────────────────────────────────────┤    ├──────────────────────────────────────────────┤
+│                                      │    │                                              │
+│  Grafana (FinOps dashboard)          │◄──►│  Azure Managed Grafana                       │
+│  Self-hosted · :3000                 │    │  · Same dashboard JSON, zero ops overhead    │
+│                                      │    │  ── or ──                                    │
+│                                      │    │  Power BI (Azure-native BI)                  │
+│                                      │    │  · Direct connector to Synapse / ADLS        │
+│                                      │    │                                              │
+├──────────────────────────────────────┤    ├──────────────────────────────────────────────┤
+│                                      │    │                                              │
+│  Python + Click CLI                  │◄──►│  Azure Data Factory (ADF)                    │
+│  Custom orchestration                │    │  · Visual pipeline builder                   │
+│                                      │    │  · Copy Activity = our INSERT SELECT         │
+│                                      │    │  · Mapping Data Flows = transformation       │
+│                                      │    │  ── or ──                                    │
+│                                      │    │  Azure Databricks Workflows                  │
+│                                      │    │  · Python notebooks as pipeline stages       │
+│                                      │    │                                              │
+├──────────────────────────────────────┤    ├──────────────────────────────────────────────┤
+│                                      │    │                                              │
+│  Docker Compose                      │◄──►│  Azure Kubernetes Service (AKS)              │
+│  Local / on-prem                     │    │  ── or ──                                    │
+│                                      │    │  Azure Container Apps                        │
+│                                      │    │  ── or ──                                    │
+│                                      │    │  Fully managed (Synapse needs no containers) │
+│                                      │    │                                              │
+└──────────────────────────────────────┘    └──────────────────────────────────────────────┘
+```
+
+### Azure Architecture Diagram
+
+```
+                        ┌─────────────────── AZURE ──────────────────────────┐
+                        │                                                    │
+  ┌──────────────────┐  │  ┌─────────────────────────────────────────────┐   │
+  │  Azure Database  │  │  │         Azure Synapse Analytics             │   │
+  │  for PostgreSQL  │──┼─►│  ┌─────────────────┐  ┌──────────────────┐  │   │
+  │  (legacy source) │  │  │  │ Serverless Pool │  │  Spark Pool      │  │   │
+  │                  │  │  │  │ (SQL on Parquet)│  │  (Iceberg reads) │  │   │
+  │  ── or ──        │  │  │  └─────────────────┘  └────────┬─────────┘  │   │
+  │  Azure SQL MI    │  │  └───────────────────────────────┼─────────────┘   │
+  └──────────────────┘  │                                   │                │
+                        │  ┌──────────────────┐             ▼                │
+                        │  │  Microsoft       │  ┌─────────────────────┐     │
+                        │  │  Purview         │  │  ADLS Gen2          │     │
+                        │  │  (catalog +      │  │  abfss://warehouse/ │     │
+                        │  │   governance)    │  │  Delta / Iceberg    │     │
+                        │  └──────────────────┘  │  Parquet files      │     │
+                        │                        └─────────────────────┘     │
+                        │  ┌──────────────────┐  ┌─────────────────────┐     │ 
+                        │  │  Azure Monitor   │  │  Azure Managed      │     │
+                        │  │  (metrics+logs)  │─►│  Grafana / Power BI │     │
+                        │  └──────────────────┘  │  (FinOps dashboard) │     │
+                        │                        └─────────────────────┘     │
+                        │  ┌──────────────────────────────────────────────┐  │
+                        │  │  Azure Data Factory  (orchestration)         │  │
+                        │  │  Copy Activity → Mapping Data Flow → Sink    │  │
+                        │  └──────────────────────────────────────────────┘  │
+                        └────────────────────────────────────────────────────┘
+```
+
+### Service Mapping Reference
+
+| Role | This Project (OSS) | Azure Managed Service | Key Difference |
+|------|-------------------|----------------------|----------------|
+| **Legacy DB** | PostgreSQL 15 | Azure DB for PostgreSQL / Azure SQL MI | Managed, auto-backup, private endpoint |
+| **SQL Transpiler** | sqlglot | sqlglot (no Azure equivalent) | Azure has no full AST-based transpiler |
+| **Query Engine** | Trino 480 | Azure Synapse Serverless / Databricks | Synapse = pay-per-query; Databricks = always-on cluster |
+| **Table Format** | Apache Iceberg | Delta Lake (preferred) or Iceberg | Delta is Microsoft's native open format on Azure |
+| **Catalog** | Project Nessie | Microsoft Purview / Unity Catalog | Purview adds lineage + compliance; Unity adds RBAC |
+| **Object Storage** | MinIO | Azure Data Lake Storage Gen2 | ADLS adds hierarchical namespace, ACLs, 11-nines durability |
+| **Metrics** | Prometheus | Azure Monitor | Monitor integrates directly with ADF/Synapse pipelines |
+| **Dashboard** | Grafana (self-hosted) | Azure Managed Grafana / Power BI | Same JSON dashboards work in Azure Managed Grafana |
+| **Orchestration** | Python + Click CLI | Azure Data Factory / Databricks Workflows | ADF has GUI + 90+ connectors; less code but less flexible |
+| **Deployment** | Docker Compose | AKS / Container Apps / Fully managed | Synapse/ADF need no containers at all |
+
+### Tradeoff: Open Source vs Azure Managed
+
+| Dimension | This Project (OSS) | Azure Managed Stack |
+|-----------|-------------------|---------------------|
+| **Cost** | Infrastructure only | Pay-per-use + managed service markup (~2–4×) |
+| **Ops overhead** | You manage upgrades, HA, backups | Fully managed, SLA-backed |
+| **Vendor lock-in** | Zero — swap any component | Moderate — ADF pipelines / Unity Catalog are Azure-specific |
+| **Portability** | Runs on any cloud or on-prem | Azure-native; migration to GCP/AWS requires rework |
+| **Setup time** | `make up` (minutes) | Days to weeks (IAM, VNet, private endpoints) |
+| **Scale ceiling** | Self-managed Trino cluster | Near-unlimited (Synapse auto-scales serverless) |
+| **Iceberg support** | Native (Nessie + Trino) | Good (Synapse GA, Databricks GA, Fabric preview) |
+| **Compliance/audit** | DIY | Built-in (Purview, Azure Policy, Defender for SQL) |
+| **Best for** | Edge, on-prem, multi-cloud, cost-sensitive | Enterprise Azure-first orgs with existing Azure spend |
+
+### Migrating This Project to Azure
+
+The open-source and Azure stacks share the same logical pipeline. To deploy on Azure:
+
+1. **Replace MinIO** → provision an ADLS Gen2 storage account; change the Iceberg `s3.endpoint` to the ABFS endpoint
+2. **Replace Nessie** → enable Purview and register the ADLS container as a data source, or use Databricks Unity Catalog
+3. **Replace Trino** → create an Azure Synapse workspace; use Serverless SQL Pool for ad-hoc queries or a Spark Pool for bulk Iceberg writes
+4. **Replace Prometheus** → route metrics to Azure Monitor via the Prometheus remote-write endpoint
+5. **Replace Grafana** → deploy Azure Managed Grafana and import the existing `finops.json` dashboard (same format)
+6. **Replace CLI orchestration** → wrap the Python pipeline in an ADF Pipeline or a Databricks Workflow notebook
+
+The `sqlglot` transpiler layer and the SQL seed data require **no changes** — they are infrastructure-agnostic.
 
 ---
 
