@@ -1,0 +1,39 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: "lakehouse-migration"
+
+scrape_configs:
+  # ── Trino query engine metrics (via built-in HTTP metrics endpoint) ─────────
+  - job_name: "trino"
+    metrics_path: "/v1/info"
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["trino:8080"]
+    # Trino exposes JMX-based metrics through its REST API at /v1/jmx
+    # For detailed query metrics we scrape the Trino REST endpoint
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+
+  # ── Trino JMX metrics (detailed, via REST) ─────────────────────────────────
+  - job_name: "trino_jmx"
+    metrics_path: "/v1/jmx/mbean/trino.execution%3Aname%3DQueryManager"
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["trino:8080"]
+
+  # ── MinIO object storage metrics ───────────────────────────────────────────
+  - job_name: "minio"
+    metrics_path: "/minio/v2/metrics/cluster"
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["minio:9000"]
+    scheme: http
+    # MinIO metrics are unauthenticated by default in dev mode
+
+  # ── Prometheus self-monitoring ─────────────────────────────────────────────
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]

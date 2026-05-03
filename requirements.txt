@@ -1,0 +1,15 @@
+# Core
+sqlglot>=23.0
+psycopg2-binary>=2.9
+trino>=0.328
+click>=8.1
+pydantic-settings>=2.0
+prometheus-client>=0.19
+rich>=13.0
+tabulate>=0.9
+
+# Dev / test
+pytest>=7.4
+pytest-cov>=4.1
+black>=23.0
+ruff>=0.1
